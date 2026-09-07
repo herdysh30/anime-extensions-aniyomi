@@ -1,0 +1,13 @@
+ext {
+    extName = 'Animesail'
+    extClass = '.Animesail'
+    extVersionCode = 5
+}
+
+apply plugin: "kei.plugins.extension.legacy"
+
+dependencies {
+    implementation(project(":lib:cloudflareinterceptor"))
+    implementation(project(":lib:unpacker"))
+    implementation(project(":lib:playlistutils"))
+}

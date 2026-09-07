@@ -11,9 +11,17 @@ object AutoDetector {
     private val GIF_HEADER = byteArrayOf(0x47.toByte(), 0x49.toByte(), 0x46.toByte())
     private const val MPEG_TS_SYNC = 0x47.toByte()
     private val MP4_FTYP = byteArrayOf(0x66.toByte(), 0x74.toByte(), 0x79.toByte(), 0x70.toByte()) // "ftyp"
+    private val MP4_STYP = byteArrayOf(0x73.toByte(), 0x74.toByte(), 0x79.toByte(), 0x70.toByte()) // "styp"
+    private val MP4_SIDX = byteArrayOf(0x73.toByte(), 0x69.toByte(), 0x64.toByte(), 0x78.toByte()) // "sidx"
     private val AVI_RIFF = byteArrayOf(0x52.toByte(), 0x49.toByte(), 0x46.toByte(), 0x46.toByte()) // "RIFF"
     private val AVI_AVI = byteArrayOf(0x41.toByte(), 0x56.toByte(), 0x49.toByte(), 0x20.toByte()) // "AVI "
+    private val WEBP_MAGIC = byteArrayOf(0x57.toByte(), 0x45.toByte(), 0x42.toByte(), 0x50.toByte()) // "WEBP"
     private const val MPEG_TS_PACKET_SIZE = 188
+    private val MP4_MOOF = byteArrayOf(0x6d.toByte(), 0x6f.toByte(), 0x6f.toByte(), 0x66.toByte()) // "moof"
+    private val MP4_MDAT = byteArrayOf(0x6d.toByte(), 0x64.toByte(), 0x61.toByte(), 0x74.toByte()) // "mdat"
+
+    private const val MIME_MP4 = "video/mp4"
+    private const val MIME_MPEG_TS = "video/mp2t"
 
     /**
      * Standard length of a single fake-header junk block. The obfuscators that
@@ -34,6 +42,29 @@ object AutoDetector {
     private const val JUNK_END_SEARCH_LIMIT = 8 * 1024
 
     /**
+     * Returns the real container MIME type of a segment buffer, so the local
+     * HLS server can stop answering every request with a hardcoded
+     * `video/mp2t`. ffmpeg-based players (mpv) can key demuxer selection off
+     * the Content-Type, and an fMP4 stream served as `video/mp2t` is a
+     * documented stall cause.
+     *
+     * Detection reuses the same magic-byte checks as the junk stripper:
+     *  * ISOBMFF → a `ftyp` / `styp` / `sidx` / `moof` / `mdat` box at offset 0
+     *    (init segments start with `ftyp`, Shaka-Packager media segments with
+     *    `styp`)
+     *  * anything else → MPEG-TS, the pre-existing hardcoded answer and the
+     *    safe default for TS streams
+     */
+    fun detectContainerMime(data: ByteArray): String {
+        if (data.size >= 8 &&
+            listOf(MP4_FTYP, MP4_STYP, MP4_SIDX, MP4_MOOF, MP4_MDAT).any { isBoxAt(data, 0, it) }
+        ) {
+            return MIME_MP4
+        }
+        return MIME_MPEG_TS
+    }
+
+    /**
      * Automatically detects how many bytes to skip at the beginning of the file.
      *
      * NOTE: This is the legacy prefix-only entry point — it inspects only the
@@ -52,8 +83,8 @@ object AutoDetector {
             // If it's already a valid MPEG-TS, don't need to skip anything
             isMpegTsValid(data) -> 0
 
-            // If it's JPEG/PNG/GIF disguising another format
-            isJpegHeader(data) || isPngHeader(data) || isGifHeader(data) -> detectDisguise(data)
+            // If it's JPEG/PNG/GIF/WEBP disguising another format
+            isJpegHeader(data) || isPngHeader(data) || isGifHeader(data) || isWebpHeader(data) -> detectDisguise(data)
 
             // If it's already a valid video format
             isVideoFormat(data) -> 0
@@ -148,14 +179,31 @@ object AutoDetector {
             data[offset] == GIF_HEADER[0] &&
             data[offset + 1] == GIF_HEADER[1] &&
             data[offset + 2] == GIF_HEADER[2]
+        // WEBP junk blocks start with RIFF + size + "WEBP". Only RIFF+WEBP is
+        // treated as junk — real AVI segments (RIFF + "AVI ") must survive.
+        val isWebp = offset + 11 < data.size &&
+            data[offset] == AVI_RIFF[0] &&
+            data[offset + 1] == AVI_RIFF[1] &&
+            data[offset + 2] == AVI_RIFF[2] &&
+            data[offset + 3] == AVI_RIFF[3] &&
+            data[offset + 8] == WEBP_MAGIC[0] &&
+            data[offset + 9] == WEBP_MAGIC[1] &&
+            data[offset + 10] == WEBP_MAGIC[2] &&
+            data[offset + 11] == WEBP_MAGIC[3]
 
-        if (!isJpeg && !isPng && !isGif) return -1
+        if (!isJpeg && !isPng && !isGif && !isWebp) return -1
 
         val searchEnd = minOf(data.size, offset + JUNK_END_SEARCH_LIMIT)
 
         var i = offset + 1
         while (i < searchEnd) {
-            if (i + 8 <= searchEnd && isFtypAt(data, i)) {
+            if (i + 8 <= searchEnd && isBoxAt(data, i, MP4_FTYP)) {
+                return i
+            }
+            if (i + 8 <= searchEnd && isBoxAt(data, i, MP4_STYP)) {
+                return i
+            }
+            if (i + 8 <= searchEnd && isBoxAt(data, i, MP4_SIDX)) {
                 return i
             }
             if (i + 12 <= searchEnd && isRiffAviAt(data, i)) {
@@ -175,10 +223,16 @@ object AutoDetector {
      * [offset, offset+3] is intentionally NOT validated. Caller MUST ensure
      * `offset + 8 <= data.size` before invoking.
      */
-    private fun isFtypAt(data: ByteArray, offset: Int): Boolean = data[offset + 4] == MP4_FTYP[0] &&
-        data[offset + 5] == MP4_FTYP[1] &&
-        data[offset + 6] == MP4_FTYP[2] &&
-        data[offset + 7] == MP4_FTYP[3]
+    private fun isFtypAt(data: ByteArray, offset: Int): Boolean = isBoxAt(data, offset, MP4_FTYP)
+
+    /**
+     * Returns true if an ISOBMFF box of [type] begins at [offset] (4-byte
+     * size + box type). Caller MUST ensure `offset + 8 <= data.size`.
+     */
+    private fun isBoxAt(data: ByteArray, offset: Int, type: ByteArray): Boolean = data[offset + 4] == type[0] &&
+        data[offset + 5] == type[1] &&
+        data[offset + 6] == type[2] &&
+        data[offset + 7] == type[3]
 
     /**
      * Returns true if a RIFF/AVI magic block begins at [offset]. Caller MUST
@@ -289,16 +343,35 @@ object AutoDetector {
     }
 
     /**
+     * Checks if it starts with a WEBP header (RIFF + size + "WEBP")
+     */
+    private fun isWebpHeader(data: ByteArray): Boolean {
+        if (data.size < 12) return false
+        return data[0] == AVI_RIFF[0] &&
+            data[1] == AVI_RIFF[1] &&
+            data[2] == AVI_RIFF[2] &&
+            data[3] == AVI_RIFF[3] &&
+            data[8] == WEBP_MAGIC[0] &&
+            data[9] == WEBP_MAGIC[1] &&
+            data[10] == WEBP_MAGIC[2] &&
+            data[11] == WEBP_MAGIC[3]
+    }
+
+    /**
      * Detects if a video is disguised under another format
      */
     private fun detectDisguise(data: ByteArray): Int {
-        // Look for MP4 "ftyp" box
-        val ftypOffset = findPattern(data, MP4_FTYP)
-        if (ftypOffset >= 4) {
-            return ftypOffset - 4 // "ftyp" is preceded by 4 bytes of size
+        // Look for MP4 "ftyp" box (init segments) or "styp"/"sidx" boxes
+        // (shaka-packager media segments)
+        for (box in listOf(MP4_FTYP, MP4_STYP, MP4_SIDX)) {
+            val boxOffset = findPattern(data, box)
+            if (boxOffset >= 4) {
+                return boxOffset - 4 // box type is preceded by 4 bytes of size
+            }
         }
 
-        // Look for AVI "RIFF"
+        // Look for AVI "RIFF" (skip offset 0 — that is the WEBP wrapper itself
+        // when the disguise IS a RIFF container)
         val riffOffset = findPattern(data, AVI_RIFF)
         if (riffOffset > 0) {
             return riffOffset

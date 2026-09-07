@@ -1,6 +1,7 @@
 package aniyomi.lib.m3u8server
 
 import android.util.Log
+import eu.kanade.tachiyomi.animesource.model.Track
 import eu.kanade.tachiyomi.animesource.model.Video
 import okhttp3.OkHttpClient
 
@@ -40,16 +41,24 @@ class M3u8Integration(
      * can re-issue them on the upstream fetch even if the media player
      * (mpv / ExoPlayer) does not carry them through to localhost.
      */
-    private fun processM3u8Video(originalVideo: Video): Video {
+    private fun processM3u8Video(originalVideo: Video, token: String? = null): Video {
         val referer = originalVideo.headers?.get("Referer")
         val userAgent = originalVideo.headers?.get("User-Agent")
-        val processedUrl = serverManager.processM3u8Url(originalVideo.videoUrl, referer, userAgent)
+        val processedUrl = serverManager.processM3u8Url(originalVideo.videoUrl, referer, userAgent, token)
+        val processedAudioTracks = originalVideo.audioTracks.map { track ->
+            val proxiedTrackUrl = if (isM3u8Url(track.url)) {
+                serverManager.processM3u8Url(track.url, referer, userAgent, token) ?: track.url
+            } else {
+                track.url
+            }
+            Track(proxiedTrackUrl, track.lang)
+        }
         return Video(
             videoUrl = processedUrl ?: originalVideo.videoUrl,
             url = originalVideo.videoUrl,
             quality = originalVideo.videoTitle,
             subtitleTracks = originalVideo.subtitleTracks,
-            audioTracks = originalVideo.audioTracks,
+            audioTracks = processedAudioTracks,
             headers = originalVideo.headers,
         )
     }
@@ -60,13 +69,13 @@ class M3u8Integration(
      * @param videos Original video list
      * @return Processed video list
      */
-    fun processVideoList(videos: List<Video>): List<Video> {
+    fun processVideoList(videos: List<Video>, token: String? = null): List<Video> {
         if (videos.none { isM3u8Url(it.videoUrl) }) return videos
 
         initializeServer()
         return videos.map { video ->
             if (isM3u8Url(video.videoUrl)) {
-                processM3u8Video(video)
+                processM3u8Video(video, token)
             } else {
                 video
             }
@@ -80,7 +89,11 @@ class M3u8Integration(
      */
     private fun isM3u8Url(url: String): Boolean {
         val m3u8Regex = Regex("""\.m3u8($|\?|#)""", RegexOption.IGNORE_CASE)
+        // Shaka Packager emits HLS playlists with a .json extension
+        // (config-*.json, data-*.json) served as application/vnd.apple.mpegurl.
+        val shakaJsonRegex = Regex("""/(?:config|data)-\d+\.json($|\?|#)""", RegexOption.IGNORE_CASE)
         return m3u8Regex.containsMatchIn(url) ||
+            shakaJsonRegex.containsMatchIn(url) ||
             url.contains("application/vnd.apple.mpegurl", ignoreCase = true)
     }
 

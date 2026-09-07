@@ -68,6 +68,7 @@ class PluginExtensionLegacy : Plugin<Project> {
                     "appName" to "Aniyomi: $extName",
                     "extClass" to extClass,
                     "nsfw" to if (isNsfw) 1 else 0,
+                    "useExoPlayer" to if (useExoPlayer) 1 else 0,
                 )
                 if (theme != null && baseUrl.isNotEmpty()) {
                     val split = baseUrl.split("://")
@@ -191,6 +192,9 @@ private val Project.extClass: String
 
 private val Project.isNsfw: Boolean
     get() = extra.getOrNull("isNsfw") == true
+
+private val Project.useExoPlayer: Boolean
+    get() = extra.getOrNull("useExoPlayer") == true
 
 private val Project.baseUrl: String
     get() = (extra.getOrNull("baseUrl") as String?).orEmpty()
