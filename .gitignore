@@ -20,3 +20,11 @@ local.properties
 .history
 signingkey.jks
 nul
+
+# Local dev scratch files
+hs_err_pid*.log
+replay_pid*.log
+vlc-help.txt
+gradle/build-logic/bin/
+src/id/animesail/*.html
+src/id/animesail/*.har
